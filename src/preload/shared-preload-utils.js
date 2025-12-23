@@ -558,7 +558,7 @@ function extractLatestResponse(provider, config) {
   }
 
   // Find all response elements
-  const allResponses = [];
+  let allResponses = [];
   let workingSelector = null;
   for (const selector of responseSelectors) {
     try {
@@ -664,10 +664,72 @@ function extractLatestResponse(provider, config) {
     return null;
   }
 
+  // Filter out thinking containers (Claude-specific)
+  // Thinking containers are hidden (opacity: 0, height: 0, pointer-events-none)
+  if (provider === 'claude') {
+    const beforeCount = allResponses.length;
+
+    allResponses = allResponses.filter(el => {
+      // Check if element or any parent is hidden
+      let current = el;
+      while (current && current !== document.body) {
+        // Check inline styles first (fast)
+        const inlineStyle = current.getAttribute('style') || '';
+        if (inlineStyle.includes('opacity: 0') ||
+            inlineStyle.includes('height: 0') ||
+            inlineStyle.includes('height:0')) {
+          console.log(`[${provider}] Filtered out hidden element (inline style):`, (el.innerText || '').substring(0, 100));
+          return false;
+        }
+
+        // Check for pointer-events-none class
+        const classes = typeof current.className === 'string' ? current.className : '';
+        if (classes.includes('pointer-events-none')) {
+          console.log(`[${provider}] Filtered out pointer-events-none element:`, (el.innerText || '').substring(0, 100));
+          return false;
+        }
+
+        // Check computed styles as backup (slower but more reliable)
+        try {
+          const computedStyle = window.getComputedStyle(current);
+          const opacity = parseFloat(computedStyle.opacity);
+          const height = computedStyle.height;
+          const display = computedStyle.display;
+
+          if (opacity === 0 || height === '0px' || display === 'none') {
+            console.log(`[${provider}] Filtered out hidden element (computed style):`, (el.innerText || '').substring(0, 100));
+            return false;
+          }
+        } catch (e) {
+          // Style check failed, continue
+        }
+
+        current = current.parentElement;
+      }
+      return true;
+    });
+
+    console.log(`[${provider}] Filtered responses: ${beforeCount} -> ${allResponses.length} (using visibility filter)`);
+    if (allResponses.length === 0) {
+      console.warn(`[${provider}] All responses were filtered out as thinking tokens`);
+      return null;
+    }
+  }
+
   // Get the last (most recent) response
   const lastResponse = allResponses[allResponses.length - 1];
 
   let text = lastResponse.innerText || lastResponse.textContent || '';
+
+  // Debug logging for Claude
+  if (provider === 'claude') {
+    console.log(`[${provider}] Selected response element:`, {
+      tag: lastResponse.tagName,
+      classes: (lastResponse.className || '').substring(0, 150),
+      textLength: text.length,
+      textPreview: text.substring(0, 150)
+    });
+  }
 
   // Filter out common thinking/loading indicators
   const thinkingIndicators = [
