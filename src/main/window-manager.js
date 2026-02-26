@@ -82,6 +82,7 @@ function createProviderView(providerKey, position) {
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: false,
+      backgroundThrottling: false,
     },
   });
 

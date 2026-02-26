@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const throttle = require('../utils/throttle');
 
 function loadConfig() {
   try {
@@ -574,83 +575,121 @@ function extractLatestResponse(provider, config) {
     }
   }
 
-  // ROBUST FALLBACK: Auto-discover response elements if configured selectors fail
+  // ROBUST FALLBACK: Auto-discover response elements if configured selectors fail.
+  // This scan is expensive (queries all div/p/article/section elements and calls
+  // getComputedStyle), so we cache results for a short cooldown period to avoid
+  // starving the rendering pipeline during streaming.
   if (allResponses.length === 0) {
-    const container = findElement(config[provider]?.responseContainer) || document.body;
+    const now = Date.now();
+    const DISCOVERY_COOLDOWN_MS = 2000;
 
-    // Try to find elements with substantial text content (likely responses)
-    const candidates = Array.from(container.querySelectorAll('div, p, article, section')).filter(el => {
-      const text = el.innerText || el.textContent || '';
-
-      // Exclude elements that are:
-      // - Too short (<50 chars)
-      // - Input containers
-      // - Inside contenteditable
-      // - Hidden (display: none or visibility: hidden)
-      // - Style/script/noscript tags
-      // - Intercom widgets
-      // - CSS content (has { } and no spaces between or very few words)
-      if (text.length < 50) return false;
-      if (el.querySelector('input, textarea')) return false;
-      if (el.closest('[contenteditable="true"]')) return false;
-      if (el.tagName === 'STYLE' || el.tagName === 'SCRIPT' || el.tagName === 'NOSCRIPT') return false;
-
-      // Exclude Intercom widget and similar UI elements
-      const className = typeof el.className === 'string' ? el.className : (el.className?.baseVal || '');
-      if (className.includes('intercom-') || className.includes('widget-') || className.includes('launcher-')) return false;
-
-      // Check if element is visible
-      const style = window.getComputedStyle(el);
-      if (style.display === 'none' || style.visibility === 'hidden') return false;
-
-      // Exclude CSS-like content (contains { } and has low word count)
-      if (text.includes('{') && text.includes('}')) {
-        const words = text.split(/\s+/).filter(w => w.length > 2);
-        const cssChars = (text.match(/[{}:;]/g) || []).length;
-        // If >20% of content is CSS characters, it's probably CSS
-        if (cssChars > text.length * 0.1 || words.length < 10) return false;
+    // Return cached results if within cooldown
+    if (extractLatestResponse._discoveryCache &&
+        extractLatestResponse._discoveryCache.provider === provider &&
+        (now - extractLatestResponse._discoveryCache.timestamp) < DISCOVERY_COOLDOWN_MS) {
+      const cached = extractLatestResponse._discoveryCache;
+      if (cached.elements.length > 0) {
+        // Re-validate that cached elements are still in the DOM
+        const stillValid = cached.elements.filter(el => document.contains(el));
+        if (stillValid.length > 0) {
+          allResponses.push(...stillValid);
+          workingSelector = '[auto-discovered-cached]';
+        }
       }
+    }
 
-      // Exclude elements with very low word density (like long strings without spaces)
-      const words = text.trim().split(/\s+/);
-      const avgWordLength = text.length / words.length;
-      if (avgWordLength > 20) return false; // Likely code/CSS, not prose
+    // Run full discovery if cache miss or cache was empty/stale
+    if (allResponses.length === 0) {
+      const container = findElement(config[provider]?.responseContainer) || document.body;
 
-      return true;
-    });
+      // Try to find elements with substantial text content (likely responses)
+      const candidates = Array.from(container.querySelectorAll('div, p, article, section')).filter(el => {
+        const text = el.innerText || el.textContent || '';
 
-    if (candidates.length > 0) {
-      // Sort by text length (descending) - longer texts are more likely to be responses
-      candidates.sort((a, b) => {
-        const aLen = (a.innerText || '').length;
-        const bLen = (b.innerText || '').length;
-        return bLen - aLen;
+        // Exclude elements that are:
+        // - Too short (<50 chars)
+        // - Input containers
+        // - Inside contenteditable
+        // - Hidden (display: none or visibility: hidden)
+        // - Style/script/noscript tags
+        // - Intercom widgets
+        // - CSS content (has { } and no spaces between or very few words)
+        if (text.length < 50) return false;
+        if (el.querySelector('input, textarea')) return false;
+        if (el.closest('[contenteditable="true"]')) return false;
+        if (el.tagName === 'STYLE' || el.tagName === 'SCRIPT' || el.tagName === 'NOSCRIPT') return false;
+
+        // Exclude Intercom widget and similar UI elements
+        const className = typeof el.className === 'string' ? el.className : (el.className?.baseVal || '');
+        if (className.includes('intercom-') || className.includes('widget-') || className.includes('launcher-')) return false;
+
+        // Check if element is visible
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+
+        // Exclude CSS-like content (contains { } and has low word count)
+        if (text.includes('{') && text.includes('}')) {
+          const words = text.split(/\s+/).filter(w => w.length > 2);
+          const cssChars = (text.match(/[{}:;]/g) || []).length;
+          // If >20% of content is CSS characters, it's probably CSS
+          if (cssChars > text.length * 0.1 || words.length < 10) return false;
+        }
+
+        // Exclude elements with very low word density (like long strings without spaces)
+        const words = text.trim().split(/\s+/);
+        const avgWordLength = text.length / words.length;
+        if (avgWordLength > 20) return false; // Likely code/CSS, not prose
+
+        return true;
       });
 
-      // Take top candidates (up to 10) and add to responses
-      allResponses.push(...candidates.slice(0, 10));
-      workingSelector = '[auto-discovered]';
-      console.log(`[${provider}] Auto-discovered ${allResponses.length} response elements`);
-
-      // Log details of top 3 candidates to help identify proper selectors
-      // Only log once per 60 seconds to avoid spam
-      const now = Date.now();
-      const shouldLog = !extractLatestResponse.lastSelectorLog || (now - extractLatestResponse.lastSelectorLog) > 60000;
-      if (candidates.length > 0 && shouldLog) {
-        extractLatestResponse.lastSelectorLog = now;
-        console.log(`[${provider}] 💡 Selector suggestions (top 3 candidates):`);
-        candidates.slice(0, 3).forEach((el, idx) => {
-          // Handle className safely (could be string or SVGAnimatedString for SVG elements)
-          const className = typeof el.className === 'string' ? el.className : (el.className?.baseVal || '');
-          const classes = className ? `.${className.split(/\s+/).filter(c => c).join('.')}` : '';
-          const id = el.id ? `#${el.id}` : '';
-          const tag = el.tagName.toLowerCase();
-          const attrs = Array.from(el.attributes)
-            .filter(a => a.name.startsWith('data-') || a.name === 'role' || a.name === 'aria-label')
-            .map(a => `[${a.name}="${a.value}"]`)
-            .join('');
-          console.log(`   ${idx + 1}. ${tag}${id}${classes.substring(0, 50)}${attrs}`);
+      if (candidates.length > 0) {
+        // Sort by text length (descending) - longer texts are more likely to be responses
+        candidates.sort((a, b) => {
+          const aLen = (a.innerText || '').length;
+          const bLen = (b.innerText || '').length;
+          return bLen - aLen;
         });
+
+        // Take top candidates (up to 10) and add to responses
+        const topCandidates = candidates.slice(0, 10);
+        allResponses.push(...topCandidates);
+        workingSelector = '[auto-discovered]';
+        console.log(`[${provider}] Auto-discovered ${allResponses.length} response elements`);
+
+        // Cache the discovered elements
+        extractLatestResponse._discoveryCache = {
+          provider,
+          timestamp: now,
+          elements: topCandidates
+        };
+
+        // Log details of top 3 candidates to help identify proper selectors
+        // Only log once per 60 seconds to avoid spam
+        const shouldLog = !extractLatestResponse.lastSelectorLog || (now - extractLatestResponse.lastSelectorLog) > 60000;
+        if (candidates.length > 0 && shouldLog) {
+          extractLatestResponse.lastSelectorLog = now;
+          console.log(`[${provider}] Selector suggestions (top 3 candidates):`);
+          candidates.slice(0, 3).forEach((el, idx) => {
+            // Handle className safely (could be string or SVGAnimatedString for SVG elements)
+            const className = typeof el.className === 'string' ? el.className : (el.className?.baseVal || '');
+            const classes = className ? `.${className.split(/\s+/).filter(c => c).join('.')}` : '';
+            const id = el.id ? `#${el.id}` : '';
+            const tag = el.tagName.toLowerCase();
+            const attrs = Array.from(el.attributes)
+              .filter(a => a.name.startsWith('data-') || a.name === 'role' || a.name === 'aria-label')
+              .map(a => `[${a.name}="${a.value}"]`)
+              .join('');
+            console.log(`   ${idx + 1}. ${tag}${id}${classes.substring(0, 50)}${attrs}`);
+          });
+        }
+      } else {
+        // Cache the empty result too so we don't re-scan immediately
+        extractLatestResponse._discoveryCache = {
+          provider,
+          timestamp: now,
+          elements: []
+        };
       }
     }
   }
@@ -956,8 +995,14 @@ function setupResponseMonitoring(provider, config, ipcRenderer, getViewInfo) {
     // Enable monitoring
     isMonitoring = true;
 
+    // Throttle the mutation callback to avoid starving the rendering pipeline.
+    // Without throttling, heavy DOM queries in checkAndSendResponse() fire on
+    // every single DOM mutation during streaming, which can block providers
+    // (especially Gemini) from rendering their responses.
+    const throttledCheck = throttle(checkAndSendResponse, 500);
+
     responseObserver = new MutationObserver((mutations) => {
-      checkAndSendResponse();
+      throttledCheck();
     });
 
     responseObserver.observe(container, {
@@ -980,6 +1025,9 @@ function setupResponseMonitoring(provider, config, ipcRenderer, getViewInfo) {
     hasCompletedThisCycle = false;
     isStreaming = false;
     checkStopButton.completionScheduled = false; // Reset completion flag
+
+    // Clear auto-discovery cache so stale elements don't persist
+    extractLatestResponse._discoveryCache = null;
 
     // Clear existing timeouts and intervals
     if (maxWaitTimeout) clearTimeout(maxWaitTimeout);

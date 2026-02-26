@@ -60,14 +60,14 @@
       "[data-testid='new-chat-button']"
     ],
     "response": [
-      "model-response",
       "message-content",
+      "div.markdown.markdown-main-panel",
+      "structured-content-container.model-response-text",
+      "structured-content-container",
+      "div.response-content",
+      "model-response",
       "div[class*='model-response']",
-      "div[class*='response']",
-      "div[data-role='model']",
-      "div[class*='message'][class*='model']",
-      "div[class*='markdown']",
-      ".markdown-content"
+      "div[class*='markdown']"
     ],
     "responseContainer": [
       "main",
@@ -78,7 +78,7 @@
     "stopButton": [
       "button[aria-label*='Stop']",
       "button[aria-label*='stop']",
-      "button.send-button[disabled]",
+      "button[data-test-id*='stop']",
       "button[class*='stop']"
     ]
   },
