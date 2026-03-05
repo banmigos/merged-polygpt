@@ -14,7 +14,7 @@ const PROVIDERS = {
     url: 'https://gemini.google.com',
     preload: 'gemini-preload.js',
     name: 'Gemini',
-    userAgent: null,
+    userAgent: 'clean-chrome',
   },
   perplexity: {
     url: 'https://www.perplexity.ai',
@@ -87,7 +87,15 @@ function createProviderView(providerKey, position) {
   });
 
   // Set user agent if specified
-  if (provider.userAgent) {
+  if (provider.userAgent === 'clean-chrome') {
+    // Strip Electron and app name from default UA so Google services accept it
+    // (Electron IS Chromium, so the remaining UA accurately represents capabilities)
+    const defaultUA = view.webContents.getUserAgent();
+    const cleanUA = defaultUA
+      .replace(/\s*Electron\/[\S]+/, '')
+      .replace(/\s*merged-polygpt\/[\S]+/i, '');
+    view.webContents.setUserAgent(cleanUA);
+  } else if (provider.userAgent) {
     view.webContents.setUserAgent(provider.userAgent);
   }
 

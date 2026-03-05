@@ -138,10 +138,10 @@
       "button[title*='New chat']"
     ],
     "response": [
-      "div.font-claude-response",
-      "div[class*='font-claude']",
       "div.standard-markdown",
       "div.progressive-markdown",
+      "div.font-claude-response",
+      "div[class*='font-claude']",
       "div[class*='markdown']",
       "div[class*='prose']",
       "div.whitespace-pre-wrap",

@@ -749,6 +749,55 @@ function extractLatestResponse(provider, config) {
     });
 
     console.log(`[${provider}] Filtered responses: ${beforeCount} -> ${allResponses.length} (using visibility filter)`);
+
+    // If all elements from the first working selector were filtered out (e.g. thinking tokens),
+    // try remaining selectors to find visible response elements
+    if (allResponses.length === 0 && workingSelector) {
+      const startIdx = responseSelectors.indexOf(workingSelector) + 1;
+      console.log(`[${provider}] All elements filtered out from "${workingSelector}", trying remaining selectors...`);
+
+      for (let i = startIdx; i < responseSelectors.length; i++) {
+        try {
+          const elements = Array.from(document.querySelectorAll(responseSelectors[i]));
+          if (elements.length > 0) {
+            // Apply the same visibility filter to these elements
+            const visibleElements = elements.filter(el => {
+              let current = el;
+              while (current && current !== document.body) {
+                const inlineStyle = current.getAttribute('style') || '';
+                if (inlineStyle.includes('opacity: 0') ||
+                    inlineStyle.includes('height: 0') ||
+                    inlineStyle.includes('height:0')) {
+                  return false;
+                }
+                const classes = typeof current.className === 'string' ? current.className : '';
+                if (classes.includes('pointer-events-none')) {
+                  return false;
+                }
+                try {
+                  const computedStyle = window.getComputedStyle(current);
+                  if (parseFloat(computedStyle.opacity) === 0 || computedStyle.height === '0px' || computedStyle.display === 'none') {
+                    return false;
+                  }
+                } catch (e) {}
+                current = current.parentElement;
+              }
+              return true;
+            });
+
+            if (visibleElements.length > 0) {
+              allResponses = visibleElements;
+              workingSelector = responseSelectors[i];
+              console.log(`[${provider}] Found ${visibleElements.length} visible elements with fallback selector "${responseSelectors[i]}"`);
+              break;
+            }
+          }
+        } catch (error) {
+          continue;
+        }
+      }
+    }
+
     if (allResponses.length === 0) {
       console.warn(`[${provider}] All responses were filtered out as thinking tokens`);
       return null;
@@ -814,9 +863,13 @@ function setupResponseMonitoring(provider, config, ipcRenderer, getViewInfo) {
   let isMonitoring = false;
   let hasCompletedThisCycle = false;
   let isStreaming = false;
+  let questionSubmitted = false; // Guard: no completion before a question is actually sent
   const MAX_WAIT_TIME = 30000; // Force completion after 30 seconds even if still updating
   let maxWaitTimeout = null;
   let retryCompletionInterval = null; // For retrying after max wait timeout
+  let stabilizationTimer = null; // Fallback: complete if text stops changing
+  const STABILIZATION_DELAY_MS = 5000; // 5 seconds of no text change = complete (safety net)
+  let stopButtonPollInterval = null; // Regular polling for stop button state
 
   // Expose debug function globally
   window.polygptDebugStopButton = function() {
@@ -846,6 +899,9 @@ function setupResponseMonitoring(provider, config, ipcRenderer, getViewInfo) {
 
   function sendCompletion() {
     if (hasCompletedThisCycle) return;
+
+    // Don't complete if no question has been submitted yet (prevents page-load false positives)
+    if (!questionSubmitted) return;
 
     const viewInfo = getViewInfo ? getViewInfo() : null;
     const position = viewInfo ? viewInfo.position : null;
@@ -884,7 +940,7 @@ function setupResponseMonitoring(provider, config, ipcRenderer, getViewInfo) {
       isComplete: true
     });
 
-    // Clear max wait timeout and retry interval
+    // Clear max wait timeout, retry interval, and stabilization timer
     if (maxWaitTimeout) {
       clearTimeout(maxWaitTimeout);
       maxWaitTimeout = null;
@@ -892,6 +948,14 @@ function setupResponseMonitoring(provider, config, ipcRenderer, getViewInfo) {
     if (retryCompletionInterval) {
       clearInterval(retryCompletionInterval);
       retryCompletionInterval = null;
+    }
+    if (stabilizationTimer) {
+      clearTimeout(stabilizationTimer);
+      stabilizationTimer = null;
+    }
+    if (stopButtonPollInterval) {
+      clearInterval(stopButtonPollInterval);
+      stopButtonPollInterval = null;
     }
   }
 
@@ -953,7 +1017,7 @@ function setupResponseMonitoring(provider, config, ipcRenderer, getViewInfo) {
   }
 
   function checkAndSendResponse() {
-    if (!isMonitoring || hasCompletedThisCycle) return;
+    if (!isMonitoring || hasCompletedThisCycle || !questionSubmitted) return;
 
     // Check stop button status
     checkStopButton();
@@ -978,6 +1042,18 @@ function setupResponseMonitoring(provider, config, ipcRenderer, getViewInfo) {
         response: response,
         isStreaming: isStreaming
       });
+
+      // Stabilization fallback: if text stops changing for STABILIZATION_DELAY_MS,
+      // consider the response complete. This handles providers where the stop button
+      // is not detected (e.g. Gemini).
+      if (stabilizationTimer) clearTimeout(stabilizationTimer);
+      stabilizationTimer = setTimeout(() => {
+        if (!hasCompletedThisCycle) {
+          const pos = getViewInfo ? getViewInfo()?.position : null;
+          console.log(`[${provider.charAt(0).toUpperCase() + provider.slice(1)}@${pos}] Text stable for ${STABILIZATION_DELAY_MS}ms, triggering completion (stabilization fallback)`);
+          sendCompletion();
+        }
+      }, STABILIZATION_DELAY_MS);
     }
   }
 
@@ -1024,6 +1100,7 @@ function setupResponseMonitoring(provider, config, ipcRenderer, getViewInfo) {
     lastResponseText = '';
     hasCompletedThisCycle = false;
     isStreaming = false;
+    questionSubmitted = true; // A question has been submitted, allow completion
     checkStopButton.completionScheduled = false; // Reset completion flag
 
     // Clear auto-discovery cache so stale elements don't persist
@@ -1034,6 +1111,10 @@ function setupResponseMonitoring(provider, config, ipcRenderer, getViewInfo) {
     maxWaitTimeout = null;
     if (retryCompletionInterval) clearInterval(retryCompletionInterval);
     retryCompletionInterval = null;
+    if (stabilizationTimer) clearTimeout(stabilizationTimer);
+    stabilizationTimer = null;
+    if (stopButtonPollInterval) clearInterval(stopButtonPollInterval);
+    stopButtonPollInterval = null;
 
     // Disable monitoring briefly to avoid capturing user message echo
     isMonitoring = false;
@@ -1050,6 +1131,20 @@ function setupResponseMonitoring(provider, config, ipcRenderer, getViewInfo) {
     setTimeout(() => {
       isMonitoring = true;
       console.log(`[${provider.charAt(0).toUpperCase() + provider.slice(1)}@${position}] Monitoring re-enabled, waiting for response`);
+
+      // Start polling for stop button state every 500ms.
+      // This runs independently of the MutationObserver, so we catch
+      // stop button changes even when the button is outside the response container.
+      if (!stopButtonPollInterval) {
+        stopButtonPollInterval = setInterval(() => {
+          if (hasCompletedThisCycle) {
+            clearInterval(stopButtonPollInterval);
+            stopButtonPollInterval = null;
+            return;
+          }
+          checkStopButton();
+        }, 500);
+      }
 
       // Do an initial check in case response appeared during blackout
       checkAndSendResponse();
