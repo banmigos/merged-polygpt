@@ -26,7 +26,7 @@ const PROVIDERS = {
     url: 'https://claude.ai',
     preload: 'claude-preload.js',
     name: 'Claude',
-    userAgent: null,
+    userAgent: 'clean-chrome',
   },
 };
 
@@ -379,8 +379,14 @@ async function createWindow() {
       console.log(`[${PROVIDERS[viewPositions[pos].providerKey].name}@${pos}] ${message}`);
     });
 
+    // Log load failures for debugging
+    viewPositions[pos].webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL) => {
+      console.log(`[${PROVIDERS[viewPositions[pos].providerKey].name}@${pos}] ❌ LOAD FAILED: ${errorCode} ${errorDescription} URL: ${validatedURL}`);
+    });
+
     // Send position and provider info to each view after it loads
     viewPositions[pos].webContents.on('did-finish-load', () => {
+      console.log(`[${PROVIDERS[viewPositions[pos].providerKey].name}@${pos}] ✓ Loaded: ${viewPositions[pos].webContents.getURL()}`);
       viewPositions[pos].webContents.send('view-info', {
         position: pos,
         provider: viewPositions[pos].providerKey,

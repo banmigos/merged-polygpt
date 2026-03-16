@@ -69,14 +69,52 @@ function injectText(text) {
   events.forEach((event) => inputElement.dispatchEvent(event));
 }
 
-const submitMessage = createSubmitHandler(
-  provider,
-  config,
-  () => inputElement,
-  null
-);
+// Custom submit handler for Claude - finds submit button by DOM proximity to input
+function claudeSubmitMessage() {
+  // First try standard selectors
+  const submitElement = findElement(config.claude?.submit);
+  if (submitElement) {
+    submitElement.click();
+    return;
+  }
 
-setupIPCListeners(provider, config, injectText, submitMessage, { value: lastText });
+  // Claude's send button has no aria-label or data-testid, and no explicit type attribute.
+  // Find it by walking up from the input element to find the nearby send button.
+  const input = findElement(config.claude?.input);
+  if (input) {
+    // Walk up to find a container with the send button (fieldset or form-like wrapper)
+    let container = input.parentElement;
+    for (let i = 0; i < 5 && container; i++) {
+      // Look for a button without text content (icon-only send button)
+      const buttons = container.querySelectorAll('button');
+      for (const btn of buttons) {
+        const text = (btn.innerText || '').trim();
+        const ariaLabel = btn.getAttribute('aria-label') || '';
+        // The send button is icon-only (no text), not a labeled UI button
+        if (!text && !ariaLabel && !btn.getAttribute('data-testid')) {
+          // Likely the send button - it's an icon-only button near the input
+          console.log('[Claude] Found send button via DOM navigation');
+          btn.click();
+          return;
+        }
+      }
+      container = container.parentElement;
+    }
+
+    // Fallback: dispatch Enter key to the input
+    console.log('[Claude] Submit button not found, using Enter key fallback');
+    const enterEvent = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      code: 'Enter',
+      keyCode: 13,
+      bubbles: true,
+      cancelable: true,
+    });
+    input.dispatchEvent(enterEvent);
+  }
+}
+
+setupIPCListeners(provider, config, injectText, claudeSubmitMessage, { value: lastText });
 
 setupInputScanner(
   provider,
@@ -103,99 +141,43 @@ setupLoadingOverlay();
 // Debug function to inspect actual DOM structure
 window.polygptDebugClaudeDOM = function() {
   console.log('=== Claude DOM Debug Info ===');
+  console.log('URL:', window.location.href);
+  console.log('Title:', document.title);
+
   const container = findElement(config.claude?.responseContainer);
-  console.log('Response container:', container);
+  console.log('Response container:', container?.tagName || 'NOT FOUND');
 
+  // Check input
+  const input = findElement(config.claude?.input);
+  console.log('Input element:', input ? `${input.tagName}.${input.className?.substring(0, 50)}` : 'NOT FOUND');
+
+  // Check for response elements
   if (container) {
-    // Find all potential response elements
-    console.log('\n--- All divs with message-author attributes ---');
-    const messageElements = container.querySelectorAll('[data-message-author-role]');
-    console.log(`Found ${messageElements.length} elements with data-message-author-role`);
-    messageElements.forEach((el, idx) => {
-      console.log(`Element ${idx + 1}:`, {
-        tag: el.tagName,
-        role: el.getAttribute('data-message-author-role'),
-        classes: el.className,
-        attributes: Array.from(el.attributes).map(a => `${a.name}="${a.value}"`),
-        textPreview: (el.innerText || '').substring(0, 100)
-      });
-    });
-
-    console.log('\n--- All elements with "assistant" in class ---');
-    const assistantElements = container.querySelectorAll('[class*="assistant"]');
-    console.log(`Found ${assistantElements.length} elements with "assistant" in class`);
-    assistantElements.forEach((el, idx) => {
-      console.log(`Element ${idx + 1}:`, {
-        tag: el.tagName,
-        classes: el.className,
-        attributes: Array.from(el.attributes).map(a => `${a.name}="${a.value}"`),
-        textPreview: (el.innerText || '').substring(0, 100)
-      });
-    });
-
-    console.log('\n--- All elements with prose/markdown classes ---');
     const proseElements = container.querySelectorAll('[class*="prose"], [class*="markdown"]');
-    console.log(`Found ${proseElements.length} elements with prose/markdown classes`);
-    proseElements.forEach((el, idx) => {
-      const info = {
-        tag: el.tagName,
-        classes: el.className,
-        parent: el.parentElement?.className,
-        textLength: (el.innerText || '').length,
-        textPreview: (el.innerText || '').substring(0, 100)
-      };
-      console.log(`Prose Element ${idx + 1}:`, JSON.stringify(info, null, 2));
-    });
+    console.log(`Prose/markdown elements: ${proseElements.length}`);
 
-    // NEW: Try to find ANY element that contains substantial text
-    console.log('\n--- All elements with substantial text (>100 chars) ---');
-    const allElements = container.querySelectorAll('*');
-    const textElements = Array.from(allElements).filter(el => {
+    const textElements = Array.from(container.querySelectorAll('*')).filter(el => {
       const text = el.innerText || el.textContent || '';
-      // Filter out CSS/script content
       if (text.includes('{') && text.includes('}')) {
         const cssChars = (text.match(/[{}:;]/g) || []).length;
         if (cssChars > text.length * 0.1) return false;
       }
       const style = window.getComputedStyle(el);
       if (style.display === 'none' || style.visibility === 'hidden') return false;
-
       return text.length > 100 && !el.querySelector('input, textarea') && text.trim().length > 50;
     });
-    console.log(`Found ${textElements.length} elements with substantial text`);
-
-    // Sort by text length to show likely responses first
-    textElements.sort((a, b) => {
-      const aLen = (a.innerText || '').length;
-      const bLen = (b.innerText || '').length;
-      return bLen - aLen;
-    });
-
-    textElements.slice(0, 10).forEach((el, idx) => {
-      const info = {
-        tag: el.tagName,
-        classes: el.className,
-        id: el.id,
-        attributes: Array.from(el.attributes).map(a => `${a.name}="${a.value}"`),
-        textLength: (el.innerText || '').length,
-        textPreview: (el.innerText || '').substring(0, 150),
-        // Add parent info to help construct selector
-        parentTag: el.parentElement?.tagName,
-        parentClasses: el.parentElement?.className,
-      };
-      console.log(`Text Element ${idx + 1}:`, JSON.stringify(info, null, 2));
-    });
+    console.log(`Elements with substantial text: ${textElements.length}`);
   }
   console.log('=== End Debug Info ===');
 };
 
-// Auto-run debug after a delay to capture initial state
+// Log key state after page loads
 setTimeout(() => {
-  console.log('[AUTO-DEBUG] Running automatic DOM inspection in 5 seconds...');
-  setTimeout(() => {
-    window.polygptDebugClaudeDOM();
-  }, 5000);
-}, 1000);
+  console.log('[CLAUDE] URL:', window.location.href);
+  console.log('[CLAUDE] Input found:', !!findElement(config.claude?.input));
+  console.log('[CLAUDE] Main found:', !!document.querySelector('main'));
+  console.log('[CLAUDE] #root children:', document.querySelector('#root')?.children?.length || 0);
+}, 5000);
 
 // Setup response monitoring
 const responseMonitor = setupResponseMonitoring(provider, config, ipcRenderer, getViewInfo);
