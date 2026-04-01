@@ -48,38 +48,35 @@
       "textarea"
     ],
     "submit": [
+      "button[aria-label='Send message']",
       "button[aria-label*='Send']",
-      "button[data-testid='send-button']",
-      "div[class*='send-button'] button",
-      "button.send-button"
+      "button.send-button",
+      "div[class*='send-button'] button"
     ],
     "newChat": [
-      "button[aria-label*='New chat']",
       "a[aria-label*='New chat']",
-      "button[title*='New chat']",
-      "[data-testid='new-chat-button']"
+      "button[aria-label*='New chat']",
+      "new-chat-button",
+      "button[title*='New chat']"
     ],
     "response": [
       "message-content",
       "div.markdown.markdown-main-panel",
       "structured-content-container.model-response-text",
-      "structured-content-container",
       "div.response-content",
-      "model-response",
-      "div[class*='model-response']",
-      "div[class*='markdown']"
+      "response-container",
+      "model-response"
     ],
     "responseContainer": [
-      "main",
+      "#chat-history",
+      "chat-window-content",
       "chat-window",
-      "div[class*='conversation']",
-      "div.content-container"
+      "main"
     ],
     "stopButton": [
+      "button[aria-label='Stop response']",
       "button[aria-label*='Stop']",
-      "button[aria-label*='stop']",
-      "button[data-test-id*='stop']",
-      "button[class*='stop']"
+      "button[aria-label*='stop']"
     ]
   },
   "perplexity": {

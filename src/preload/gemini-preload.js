@@ -161,3 +161,4 @@ waitForDOM(() => {
 
 // Setup health check (runs 10 seconds after page load)
 setupHealthCheck(provider, config, getViewInfo);
+

@@ -581,7 +581,7 @@ function extractLatestResponse(provider, config) {
   // starving the rendering pipeline during streaming.
   if (allResponses.length === 0) {
     const now = Date.now();
-    const DISCOVERY_COOLDOWN_MS = 2000;
+    const DISCOVERY_COOLDOWN_MS = 5000;
 
     // Return cached results if within cooldown
     if (extractLatestResponse._discoveryCache &&
@@ -807,6 +807,9 @@ function extractLatestResponse(provider, config) {
   // Get the last (most recent) response
   const lastResponse = allResponses[allResponses.length - 1];
 
+  // Use textContent as fallback when innerText is empty.
+  // Gemini's streaming animation sets elements to height:0 during rendering,
+  // causing innerText to return empty while textContent has the actual text.
   let text = lastResponse.innerText || lastResponse.textContent || '';
 
   // Debug logging for Claude
@@ -819,7 +822,7 @@ function extractLatestResponse(provider, config) {
     });
   }
 
-  // Filter out common thinking/loading indicators
+  // Filter out common thinking/loading indicators and UI labels
   const thinkingIndicators = [
     /^Thinking\s*$/i,
     /^Show thinking\s*$/i,
@@ -835,7 +838,10 @@ function extractLatestResponse(provider, config) {
     /^Acknowledging.*\.\.\.$/i,
     /^Requesting.*\.\.\.$/i,
     /^Defining.*\.\.\.$/i,
-    /^You stopped this response\.\.\.$/i
+    /^You stopped this response\.\.\.$/i,
+    /^Gemini said$/i,
+    /^You said$/i,
+    /^Conversation with Gemini$/i,
   ];
 
   // Split by newlines and filter out lines that match thinking indicators
@@ -864,11 +870,11 @@ function setupResponseMonitoring(provider, config, ipcRenderer, getViewInfo) {
   let hasCompletedThisCycle = false;
   let isStreaming = false;
   let questionSubmitted = false; // Guard: no completion before a question is actually sent
-  const MAX_WAIT_TIME = 30000; // Force completion after 30 seconds even if still updating
+  const MAX_WAIT_TIME = 120000; // Force completion after 120 seconds (Gemini Pro thinking can be long)
   let maxWaitTimeout = null;
   let retryCompletionInterval = null; // For retrying after max wait timeout
   let stabilizationTimer = null; // Fallback: complete if text stops changing
-  const STABILIZATION_DELAY_MS = 5000; // 5 seconds of no text change = complete (safety net)
+  const STABILIZATION_DELAY_MS = 8000; // 8 seconds of no text change = complete (only when stop button is absent)
   let stopButtonPollInterval = null; // Regular polling for stop button state
 
   // Expose debug function globally
@@ -897,7 +903,7 @@ function setupResponseMonitoring(provider, config, ipcRenderer, getViewInfo) {
     console.log('=== End Debug Info ===');
   };
 
-  function sendCompletion() {
+  function sendCompletion(force = false) {
     if (hasCompletedThisCycle) return;
 
     // Don't complete if no question has been submitted yet (prevents page-load false positives)
@@ -906,11 +912,15 @@ function setupResponseMonitoring(provider, config, ipcRenderer, getViewInfo) {
     const viewInfo = getViewInfo ? getViewInfo() : null;
     const position = viewInfo ? viewInfo.position : null;
 
-    // CRITICAL: Don't complete if stop button is still present (still streaming)
-    const stopButton = findElement(config[provider]?.stopButton);
-    if (stopButton && isStreaming) {
-      console.log(`[${provider.charAt(0).toUpperCase() + provider.slice(1)}@${position}] ⚠️ Stop button still present, not completing yet`);
-      return;
+    // Don't complete if stop button is still present (still streaming),
+    // UNLESS force=true (used by stabilization fallback — some providers like
+    // Gemini keep the stop button visible even after the response finishes).
+    if (!force) {
+      const stopButton = findElement(config[provider]?.stopButton);
+      if (stopButton && isStreaming) {
+        console.log(`[${provider.charAt(0).toUpperCase() + provider.slice(1)}@${position}] ⚠️ Stop button still present, not completing yet`);
+        return;
+      }
     }
 
     const finalResponse = extractLatestResponse(provider, config);
@@ -1007,12 +1017,54 @@ function setupResponseMonitoring(provider, config, ipcRenderer, getViewInfo) {
       checkStopButton.completionScheduled = true;
       console.log(`[${provider.charAt(0).toUpperCase() + provider.slice(1)}@${position}] ✓ Stop button disappeared, response complete`);
 
-      // Small delay to ensure DOM is updated
-      setTimeout(() => {
-        sendCompletion();
-        // Reset flag after completion
-        checkStopButton.completionScheduled = false;
-      }, 500);
+      // Wait for DOM to settle after streaming ends, then try to complete.
+      // Some providers (Gemini) transition from pending-response to model-response
+      // after completion, which can take a moment. Retry with increasing delays
+      // to give the DOM time to hydrate the final response.
+      let retries = 0;
+      const maxRetries = 5;
+      const retryDelay = 1500;
+
+      function attemptCompletion() {
+        // Clear auto-discovery cache so stale elements from the pending
+        // phase don't mask the final response.
+        extractLatestResponse._discoveryCache = null;
+
+        // First try: only use configured selectors (no auto-discovery) to avoid
+        // picking up unrelated page content like zero-state welcome containers.
+        const responseSelectors = config[provider]?.response || [];
+        let found = false;
+        for (const selector of responseSelectors) {
+          try {
+            const elements = document.querySelectorAll(selector);
+            if (elements.length > 0) {
+              const lastEl = elements[elements.length - 1];
+              const text = (lastEl.innerText || lastEl.textContent || '').trim();
+              if (text.length > 0) {
+                found = true;
+                break;
+              }
+            }
+          } catch (e) { continue; }
+        }
+
+        if (found) {
+          sendCompletion();
+          checkStopButton.completionScheduled = false;
+        } else if (retries < maxRetries) {
+          retries++;
+          console.log(`[${provider.charAt(0).toUpperCase() + provider.slice(1)}@${position}] Response not found via selectors after stop button disappeared, retrying (${retries}/${maxRetries})...`);
+          setTimeout(attemptCompletion, retryDelay);
+        } else {
+          // Give up retrying — fall back to normal sendCompletion which uses
+          // extractLatestResponse (including auto-discovery)
+          console.log(`[${provider.charAt(0).toUpperCase() + provider.slice(1)}@${position}] Max retries reached, forcing completion`);
+          sendCompletion(true);
+          checkStopButton.completionScheduled = false;
+        }
+      }
+
+      setTimeout(attemptCompletion, 1500);
     }
   }
 
@@ -1044,14 +1096,19 @@ function setupResponseMonitoring(provider, config, ipcRenderer, getViewInfo) {
       });
 
       // Stabilization fallback: if text stops changing for STABILIZATION_DELAY_MS,
-      // consider the response complete. This handles providers where the stop button
-      // is not detected (e.g. Gemini).
+      // attempt completion. This does NOT force — it respects the stop button.
+      // Completion only happens if the stop button is absent (truly finished).
       if (stabilizationTimer) clearTimeout(stabilizationTimer);
       stabilizationTimer = setTimeout(() => {
         if (!hasCompletedThisCycle) {
           const pos = getViewInfo ? getViewInfo()?.position : null;
-          console.log(`[${provider.charAt(0).toUpperCase() + provider.slice(1)}@${pos}] Text stable for ${STABILIZATION_DELAY_MS}ms, triggering completion (stabilization fallback)`);
-          sendCompletion();
+          const stopBtn = findElement(config[provider]?.stopButton);
+          if (stopBtn) {
+            console.log(`[${provider.charAt(0).toUpperCase() + provider.slice(1)}@${pos}] Text stable for ${STABILIZATION_DELAY_MS}ms but stop button still present, waiting...`);
+          } else {
+            console.log(`[${provider.charAt(0).toUpperCase() + provider.slice(1)}@${pos}] Text stable for ${STABILIZATION_DELAY_MS}ms, stop button absent, completing`);
+            sendCompletion(true);
+          }
         }
       }, STABILIZATION_DELAY_MS);
     }
@@ -1075,7 +1132,8 @@ function setupResponseMonitoring(provider, config, ipcRenderer, getViewInfo) {
     // Without throttling, heavy DOM queries in checkAndSendResponse() fire on
     // every single DOM mutation during streaming, which can block providers
     // (especially Gemini) from rendering their responses.
-    const throttledCheck = throttle(checkAndSendResponse, 500);
+    // 1500ms throttle gives providers enough time to render between checks.
+    const throttledCheck = throttle(checkAndSendResponse, 1500);
 
     responseObserver = new MutationObserver((mutations) => {
       throttledCheck();
