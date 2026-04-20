@@ -1,17 +1,17 @@
-const { BaseWindow, WebContentsView, Menu, clipboard } = require('electron');
+const { BaseWindow, BrowserWindow, WebContentsView, Menu, clipboard, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
 // Provider metadata
 const PROVIDERS = {
   chatgpt: {
-    url: 'https://chat.openai.com',
+    url: 'https://chatgpt.com',
     preload: 'chatgpt-preload.js',
     name: 'ChatGPT',
     userAgent: null,
   },
   gemini: {
-    url: 'https://gemini.google.com',
+    url: 'https://gemini.google.com/app',
     preload: 'gemini-preload.js',
     name: 'Gemini',
     userAgent: 'clean-chrome',
@@ -99,6 +99,7 @@ function createProviderView(providerKey, position) {
     view.webContents.setUserAgent(provider.userAgent);
   }
 
+
   // Track provider and position
   view.providerKey = providerKey;
   view.position = position;
@@ -133,13 +134,79 @@ function createProviderView(providerKey, position) {
     }
   });
 
+  // Auto-retry on load failure (network errors, DNS failures, etc.)
+  let retryCount = 0;
+  const MAX_RETRIES = 3;
+  const RETRY_DELAY = 10000; // 10 seconds
+
+  view.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL) => {
+    if (retryCount < MAX_RETRIES) {
+      retryCount++;
+      console.log(`[${providerKey}@${position}] Load failed (${errorCode}: ${errorDescription}), retrying ${retryCount}/${MAX_RETRIES} in ${RETRY_DELAY / 1000}s...`);
+      setTimeout(() => {
+        view.webContents.loadURL(provider.url);
+      }, RETRY_DELAY);
+    }
+  });
+
+  // Detect HTTP error pages (502, 503, etc.) and auto-retry
+  view.webContents.on('did-finish-load', () => {
+    view.webContents.executeJavaScript(`
+      (function() {
+        const text = document.body ? document.body.innerText : '';
+        return /502\\.|503\\.|server encountered a temporary error/i.test(text) && text.length < 500;
+      })()
+    `).then((isErrorPage) => {
+      if (isErrorPage && retryCount < MAX_RETRIES) {
+        retryCount++;
+        console.log(`[${providerKey}@${position}] Detected server error page, retrying ${retryCount}/${MAX_RETRIES} in ${RETRY_DELAY / 1000}s...`);
+        setTimeout(() => {
+          view.webContents.loadURL(provider.url);
+        }, RETRY_DELAY);
+      }
+    }).catch(() => {});
+  });
+
   // Load URL
   view.webContents.loadURL(provider.url);
 
   return view;
 }
 
+// Prime Google cookies if missing (Gemini returns 502 without them)
+async function primeGoogleCookies() {
+  const ses = session.fromPartition('persist:shared');
+  const cookies = await ses.cookies.get({ domain: '.google.com' });
+  if (cookies.length > 0) return;
+
+  console.log('[Init] Priming Google cookies for Gemini...');
+  const primer = new BrowserWindow({
+    show: false,
+    webPreferences: { partition: 'persist:shared' },
+  });
+
+  await new Promise(resolve => {
+    const timeout = setTimeout(resolve, 10000);
+    primer.webContents.on('did-finish-load', () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+    primer.webContents.on('did-fail-load', () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+    primer.webContents.loadURL('https://www.google.com');
+  });
+
+  primer.close();
+  const newCookies = await ses.cookies.get({ domain: '.google.com' });
+  console.log(`[Init] Google cookies primed (${newCookies.length} cookies)`);
+}
+
 async function createWindow() {
+  // Ensure Google cookies exist before loading Gemini
+  await primeGoogleCookies();
+
   // Create main window
   const mainWindow = new BaseWindow({
     width: 1600,

@@ -144,18 +144,40 @@ ipcRenderer.on('response-status-update', (event, data) => {
   responseCount = data.count;
   const total = data.total || 3;
 
-  // Update with elapsed time if timer is running
-  if (submitTime) {
-    updateElapsedTime();
-  } else {
-    responseStatus.textContent = `${responseCount}/${total} responses received`;
-  }
-
-  // Stop timer when all responses received
-  if (responseCount >= total) {
+  if (data.mergeComplete) {
+    // Merge finished
     if (timerInterval) {
       clearInterval(timerInterval);
       timerInterval = null;
+    }
+    const elapsed = submitTime ? Math.floor((Date.now() - submitTime) / 1000) : 0;
+    const minutes = Math.floor(elapsed / 60);
+    const seconds = elapsed % 60;
+    const timeStr = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+    responseStatus.textContent = `✓ Merge complete (${timeStr})`;
+    submitTime = null;
+  } else if (data.merging) {
+    // Merge in progress - keep timer running
+    if (submitTime) {
+      updateElapsedTime();
+      responseStatus.textContent = responseStatus.textContent.replace(/\)$/, ') — merging...');
+    } else {
+      responseStatus.textContent = '3/3 responses — merging...';
+    }
+  } else {
+    // Normal response counting
+    if (submitTime) {
+      updateElapsedTime();
+    } else {
+      responseStatus.textContent = `${responseCount}/${total} responses received`;
+    }
+
+    // Stop timer when all responses received (only in non-merge mode)
+    if (responseCount >= total) {
+      if (timerInterval) {
+        clearInterval(timerInterval);
+        timerInterval = null;
+      }
     }
   }
 });

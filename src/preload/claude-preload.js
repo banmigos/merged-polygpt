@@ -30,43 +30,49 @@ function injectText(text) {
 
   lastText = text;
 
-  // Handle textarea
-  if (inputElement.tagName === 'TEXTAREA') {
+  // Focus the element first - required for execCommand to work
+  inputElement.focus();
+
+  if (inputElement.tagName === 'TEXTAREA' || inputElement.tagName === 'INPUT') {
     inputElement.value = text;
-    // Set selection to end of text
     inputElement.selectionStart = text.length;
     inputElement.selectionEnd = text.length;
+    inputElement.dispatchEvent(new Event('input', { bubbles: true }));
   } else if (inputElement.contentEditable === 'true') {
-    // Handle contenteditable div - preserve newlines as <br>
-    // Clear existing content - avoid innerHTML due to TrustedHTML CSP
-    while (inputElement.firstChild) {
-      inputElement.removeChild(inputElement.firstChild);
-    }
+    // Claude uses Tiptap/ProseMirror which maintains its own model.
+    // Direct DOM manipulation doesn't update the editor state.
+    // Use execCommand which triggers the native input path that ProseMirror listens to.
+    try {
+      // Select all existing content
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(inputElement);
+      sel.removeAllRanges();
+      sel.addRange(range);
 
-    // Split by newlines and create text nodes with <br> between them
-    const lines = text.split('\n');
-    lines.forEach((line, index) => {
-      inputElement.appendChild(document.createTextNode(line));
-      if (index < lines.length - 1) {
-        inputElement.appendChild(document.createElement('br'));
+      // Delete existing content
+      document.execCommand('delete', false, null);
+
+      // Insert new text
+      if (text.length > 0) {
+        document.execCommand('insertText', false, text);
       }
-    });
-  } else if (inputElement.tagName === 'INPUT') {
-    inputElement.value = text;
+    } catch (err) {
+      console.error('[Claude] execCommand injection failed, using fallback:', err);
+      // Fallback: direct DOM manipulation + events
+      while (inputElement.firstChild) {
+        inputElement.removeChild(inputElement.firstChild);
+      }
+      const lines = text.split('\n');
+      lines.forEach((line, index) => {
+        inputElement.appendChild(document.createTextNode(line));
+        if (index < lines.length - 1) {
+          inputElement.appendChild(document.createElement('br'));
+        }
+      });
+      inputElement.dispatchEvent(new Event('input', { bubbles: true }));
+    }
   }
-
-  // Dispatch events to trigger React/framework detection
-  const events = [
-    new Event('input', { bubbles: true }),
-    new Event('change', { bubbles: true }),
-    new KeyboardEvent('keyup', {
-      bubbles: true,
-      cancelable: true,
-      key: 'a',
-    }),
-  ];
-
-  events.forEach((event) => inputElement.dispatchEvent(event));
 }
 
 // Custom submit handler for Claude - finds submit button by DOM proximity to input
@@ -78,22 +84,25 @@ function claudeSubmitMessage() {
     return;
   }
 
-  // Claude's send button has no aria-label or data-testid, and no explicit type attribute.
-  // Find it by walking up from the input element to find the nearby send button.
+  // Fallback: find send button near the input by walking up the DOM
   const input = findElement(config.claude?.input);
   if (input) {
-    // Walk up to find a container with the send button (fieldset or form-like wrapper)
     let container = input.parentElement;
-    for (let i = 0; i < 5 && container; i++) {
-      // Look for a button without text content (icon-only send button)
+    for (let i = 0; i < 8 && container; i++) {
+      // Look for button with send-related attributes or SVG icon buttons
       const buttons = container.querySelectorAll('button');
       for (const btn of buttons) {
         const text = (btn.innerText || '').trim();
-        const ariaLabel = btn.getAttribute('aria-label') || '';
-        // The send button is icon-only (no text), not a labeled UI button
-        if (!text && !ariaLabel && !btn.getAttribute('data-testid')) {
-          // Likely the send button - it's an icon-only button near the input
-          console.log('[Claude] Found send button via DOM navigation');
+        const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+        // Match send button: icon-only buttons near input, or buttons with send-like aria-labels
+        if (ariaLabel.includes('send') || ariaLabel.includes('submit')) {
+          console.log('[Claude] Found send button via aria-label:', ariaLabel);
+          btn.click();
+          return;
+        }
+        // Icon-only button (no text, has SVG child) near the input area
+        if (!text && btn.querySelector('svg') && !btn.closest('nav') && !btn.closest('header')) {
+          console.log('[Claude] Found send button via DOM navigation (icon-only button)');
           btn.click();
           return;
         }

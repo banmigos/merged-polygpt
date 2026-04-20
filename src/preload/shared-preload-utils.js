@@ -623,6 +623,14 @@ function extractLatestResponse(provider, config) {
         const className = typeof el.className === 'string' ? el.className : (el.className?.baseVal || '');
         if (className.includes('intercom-') || className.includes('widget-') || className.includes('launcher-')) return false;
 
+        // Exclude welcome/empty-state containers (Gemini's "zero-state" welcome screen,
+        // onboarding prompts, suggestion chips, etc.). These are never actual responses
+        // and mislead auto-discovery when the real response DOM hasn't been found.
+        if (/zero-state|empty-state|welcome|onboarding|suggestion-chip|greeting-container/i.test(className)) return false;
+
+        // Exclude elements that contain the user's message (not a response)
+        if (el.closest('user-query, user-query-content, [data-message-author-role="user"]')) return false;
+
         // Check if element is visible
         const style = window.getComputedStyle(el);
         if (style.display === 'none' || style.visibility === 'hidden') return false;
@@ -918,7 +926,12 @@ function setupResponseMonitoring(provider, config, ipcRenderer, getViewInfo) {
     if (!force) {
       const stopButton = findElement(config[provider]?.stopButton);
       if (stopButton && isStreaming) {
-        console.log(`[${provider.charAt(0).toUpperCase() + provider.slice(1)}@${position}] ⚠️ Stop button still present, not completing yet`);
+        // Throttle this log to once per 5s — it was firing every 500ms poll
+        const now = Date.now();
+        if (!sendCompletion._lastStopLog || now - sendCompletion._lastStopLog > 5000) {
+          sendCompletion._lastStopLog = now;
+          console.log(`[${provider.charAt(0).toUpperCase() + provider.slice(1)}@${position}] ⚠️ Stop button still present, not completing yet`);
+        }
         return;
       }
     }
@@ -1160,6 +1173,7 @@ function setupResponseMonitoring(provider, config, ipcRenderer, getViewInfo) {
     isStreaming = false;
     questionSubmitted = true; // A question has been submitted, allow completion
     checkStopButton.completionScheduled = false; // Reset completion flag
+    sendCompletion._lastStopLog = 0; // Reset throttled stop-button log
 
     // Clear auto-discovery cache so stale elements don't persist
     extractLatestResponse._discoveryCache = null;

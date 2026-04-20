@@ -30,37 +30,44 @@ function injectText(text) {
 
   lastText = text;
 
-  if (inputElement.tagName === 'TEXTAREA') {
+  // Focus the element first
+  inputElement.focus();
+
+  if (inputElement.tagName === 'TEXTAREA' || inputElement.tagName === 'INPUT') {
     inputElement.value = text;
     inputElement.selectionStart = text.length;
     inputElement.selectionEnd = text.length;
+    inputElement.dispatchEvent(new Event('input', { bubbles: true }));
   } else if (inputElement.contentEditable === 'true') {
-    while (inputElement.firstChild) {
-      inputElement.removeChild(inputElement.firstChild);
-    }
+    // ChatGPT uses a React-controlled contentEditable.
+    // Use execCommand to trigger native input events that React listens to.
+    try {
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(inputElement);
+      sel.removeAllRanges();
+      sel.addRange(range);
 
-    const lines = text.split('\n');
-    lines.forEach((line, index) => {
-      inputElement.appendChild(document.createTextNode(line));
-      if (index < lines.length - 1) {
-        inputElement.appendChild(document.createElement('br'));
+      document.execCommand('delete', false, null);
+
+      if (text.length > 0) {
+        document.execCommand('insertText', false, text);
       }
-    });
-  } else if (inputElement.tagName === 'INPUT') {
-    inputElement.value = text;
+    } catch (err) {
+      console.error('[ChatGPT] execCommand injection failed, using fallback:', err);
+      while (inputElement.firstChild) {
+        inputElement.removeChild(inputElement.firstChild);
+      }
+      const lines = text.split('\n');
+      lines.forEach((line, index) => {
+        inputElement.appendChild(document.createTextNode(line));
+        if (index < lines.length - 1) {
+          inputElement.appendChild(document.createElement('br'));
+        }
+      });
+      inputElement.dispatchEvent(new Event('input', { bubbles: true }));
+    }
   }
-
-  const events = [
-    new Event('input', { bubbles: true }),
-    new Event('change', { bubbles: true }),
-    new KeyboardEvent('keyup', {
-      bubbles: true,
-      cancelable: true,
-      key: 'a',
-    }),
-  ];
-
-  events.forEach((event) => inputElement.dispatchEvent(event));
 }
 
 const submitMessage = createSubmitHandler(

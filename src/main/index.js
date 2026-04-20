@@ -20,7 +20,8 @@ const mergeState = {
   },
   completedCount: 0,
   autoMergeTimer: null,
-  currentQuestion: ''
+  currentQuestion: '',
+  mergeInProgress: false // true while merger window is generating the merged response
 };
 
 const SETTINGS_FILE = path.join(app.getPath('userData'), 'merge-settings.json');
@@ -76,28 +77,22 @@ async function performMerge() {
 
   console.log('[Merge] Performing merge operation');
 
-  // Collect the 3 responses (excluding merger window)
+  // Collect the responses (excluding merger window) and assign sequential citation numbers
   const responsesToMerge = [];
-  const positionMap = {
-    'topLeft': '1',
-    'topRight': '2',
-    'bottomLeft': '3',
-    'bottomRight': '4'
-  };
+  let citationNum = 0;
 
   windowManager.POSITIONS.forEach(pos => {
     if (pos !== mergeState.mergerWindow && mergeState.responses[pos]) {
+      citationNum++;
       // Get provider name for this position
       const view = mainWindow.viewPositions[pos];
       const providerKey = view ? view.providerKey : 'unknown';
       const providerName = providerKey.charAt(0).toUpperCase() + providerKey.slice(1);
-      const windowId = positionMap[pos] || '?';
 
       responsesToMerge.push({
-        windowId: windowId,
+        citationNum: citationNum,
         provider: providerName,
         position: pos,
-        citation: `${windowId}:${providerName}`,
         text: mergeState.responses[pos].text || 'No response yet'
       });
     }
@@ -108,6 +103,11 @@ async function performMerge() {
     return;
   }
 
+  // Build dynamic window mapping based on actual responses
+  const windowMapping = responsesToMerge.map(r =>
+    `   - **[${r.citationNum}]** = ${r.provider}`
+  ).join('\n');
+
   // Build the merge prompt with citations
   const mergePrompt = `Below is a question and ${responsesToMerge.length} responses from different AI assistants. Your task is to synthesize these responses into a single, comprehensive answer.
 
@@ -115,32 +115,34 @@ CITATION RULES (VERY IMPORTANT):
 1. Each response may contain references to papers, websites, or other sources
 2. When citing information in your merged answer:
    - **If the statement is backed by a specific source** (paper, website, document) mentioned in one of the responses:
-     Cite it as: **[Window #: Source Title/URL]**
+     Cite it as: **[# : Source Title/URL]**
      Example: **[1: Nature 2023]**, **[2: arxiv.org/1234]**, **[3: WHO Guidelines]**
 
    - **If the statement comes from an LLM's analysis without a specific source**:
-     Cite just the window number: **[1]**, **[2]**, or **[3]**
+     Cite just the number: **[1]**, **[2]**, or **[3]**
      Example: "According to the analysis **[2]**..."
 
-3. Window mapping:
-   - **[1]** = Response from Window 1 (top-left)
-   - **[2]** = Response from Window 2 (top-right)
-   - **[3]** = Response from Window 3 (bottom-left)
+3. Source mapping:
+${windowMapping}
 
 4. Always use bold formatting for citations
 5. Extract and preserve the actual sources from the original responses when they exist
 
 Original Question: ${mergeState.currentQuestion}
 
-${responsesToMerge.map(r => `Response from Window ${r.windowId}:
+${responsesToMerge.map(r => `Response from ${r.provider} [${r.citationNum}]:
 ${r.text}`).join('\n\n---\n\n')}
 
 Please provide a merged, comprehensive answer with proper citations following the rules above:`;
 
-  console.log('[Merge] Sending merge prompt to merger window:', mergeState.mergerWindow);
+  const mergerView = mainWindow.viewPositions[mergeState.mergerWindow];
+  const mergerProviderKey = mergerView ? mergerView.providerKey : 'unknown';
+  console.log(`[Merge] Sending merge prompt to merger window: ${mergeState.mergerWindow} (${mergerProviderKey})`);
+
+  // Mark merge in progress BEFORE sending the prompt
+  mergeState.mergeInProgress = true;
 
   // Send the merge prompt to the merger window
-  const mergerView = mainWindow.viewPositions[mergeState.mergerWindow];
   if (mergerView && mergerView.webContents) {
     mergerView.webContents.send('text-update', mergePrompt);
 
@@ -150,7 +152,7 @@ Please provide a merged, comprehensive answer with proper citations following th
     }, 500);
   }
 
-  // Reset state for next question
+  // Reset collection state for next question (but keep mergeInProgress = true)
   mergeState.responses = {
     topLeft: null,
     topRight: null,
@@ -160,11 +162,12 @@ Please provide a merged, comprehensive answer with proper citations following th
   mergeState.completedCount = 0;
   mergeState.currentQuestion = '';
 
-  // Update status
+  // Update status to show merge is in progress
   if (mainWindow.mainView && mainWindow.mainView.webContents) {
     mainWindow.mainView.webContents.send('response-status-update', {
-      count: 0,
-      total: 3
+      count: 3,
+      total: 3,
+      merging: true
     });
   }
 }
@@ -258,6 +261,7 @@ app.on('ready', async () => {
         bottomRight: null
       };
       mergeState.completedCount = 0;
+      mergeState.mergeInProgress = false;
 
       // Clear any existing timeout
       if (mergeState.autoMergeTimer) {
@@ -420,8 +424,8 @@ app.on('ready', async () => {
     if (!mergeState.mergeModeEnabled) return;
 
     const position = data.position;
-    // Only count responses from non-merger windows
-    if (position && position !== mergeState.mergerWindow) {
+    // Only track responses from non-merger windows, and not during an in-progress merge
+    if (position && position !== mergeState.mergerWindow && !mergeState.mergeInProgress) {
       mergeState.responses[position] = data.response;
       console.log(`[Merge] Response update from ${position} (${data.provider})`);
     }
@@ -432,8 +436,35 @@ app.on('ready', async () => {
     if (!mergeState.mergeModeEnabled) return;
 
     const position = data.position;
-    // Only count responses from non-merger windows
-    if (position && position !== mergeState.mergerWindow) {
+
+    // Handle merger window's response
+    if (position === mergeState.mergerWindow) {
+      if (mergeState.mergeInProgress) {
+        // Merger finished generating the merged response
+        mergeState.mergeInProgress = false;
+        console.log(`[Merge] ✓ Merge complete from ${position} (${data.provider}) - ${(data.response?.text || '').length} chars`);
+
+        // Update status to show merge is complete
+        if (mainWindow.mainView && mainWindow.mainView.webContents) {
+          mainWindow.mainView.webContents.send('response-status-update', {
+            count: 3,
+            total: 3,
+            mergeComplete: true
+          });
+        }
+      }
+      // Always skip counting merger window responses toward the next merge
+      return;
+    }
+
+    // Ignore late responses from non-merger windows if a merge is already in progress
+    if (mergeState.mergeInProgress) {
+      console.log(`[Merge] Ignoring late response from ${position} (${data.provider}) - merge already in progress`);
+      return;
+    }
+
+    // Count responses from non-merger windows
+    if (position) {
       mergeState.responses[position] = data.response;
       mergeState.completedCount++;
 
@@ -472,8 +503,6 @@ app.on('ready', async () => {
           performMerge();
         }, mergeState.mergeTimeout * 1000);
       }
-    } else if (position === mergeState.mergerWindow) {
-      console.log(`[Merge] Ignoring response from merger window (${position})`);
     }
   });
 

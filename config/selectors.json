@@ -49,9 +49,10 @@
     ],
     "submit": [
       "button[aria-label='Send message']",
-      "button[aria-label*='Send']",
       "button.send-button",
-      "div[class*='send-button'] button"
+      "button[aria-label*='Send']",
+      "div[class*='send-button'] button",
+      "button[aria-label*='send']"
     ],
     "newChat": [
       "a[aria-label*='New chat']",
@@ -60,17 +61,18 @@
       "button[title*='New chat']"
     ],
     "response": [
-      "message-content",
-      "div.markdown.markdown-main-panel",
+      "structured-content-container.model-response-text div.markdown.markdown-main-panel",
+      "structured-content-container.model-response-text message-content",
       "structured-content-container.model-response-text",
-      "div.response-content",
-      "response-container",
-      "model-response"
+      "div.response-content > structured-content-container.model-response-text",
+      "div.response-content div.markdown.markdown-main-panel",
+      "div.markdown.markdown-main-panel"
     ],
     "responseContainer": [
       "#chat-history",
       "chat-window-content",
       "chat-window",
+      "infinite-scroller",
       "main"
     ],
     "stopButton": [
@@ -117,15 +119,17 @@
   "claude": {
     "input": [
       "div[data-testid='chat-input']",
-      "div[contenteditable='true'][role='textbox']",
       "div.ProseMirror",
+      "div[contenteditable='true'][role='textbox']",
       "div[contenteditable='true']",
       "[role='textbox']"
     ],
     "submit": [
+      "button[data-testid='send-button']",
       "button[aria-label='Send Message']",
       "button[aria-label='Send message']",
       "button[aria-label*='Send']",
+      "fieldset button[type='button']:not([aria-label])",
       "button[type='submit']"
     ],
     "newChat": [
